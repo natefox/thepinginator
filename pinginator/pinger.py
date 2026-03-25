@@ -13,12 +13,6 @@ _RTT_PATTERN = re.compile(r"time[=<]([\d.]+)\s*ms")
 
 
 def parse_ping_output(output: str, returncode: int) -> dict:
-    if returncode != 0 or not output.strip():
-        match = _RTT_PATTERN.search(output)
-        if match:
-            return {"success": True, "rtt_ms": float(match.group(1))}
-        return {"success": False, "rtt_ms": None}
-
     match = _RTT_PATTERN.search(output)
     if match:
         return {"success": True, "rtt_ms": float(match.group(1))}

@@ -164,8 +164,8 @@ function formatLabel(val) {
     }
     return val;
   }
-  // val is an ISO timestamp
-  const d = new Date(val);
+  // val is a Unix timestamp in seconds
+  const d = new Date(val * 1000);
   if (isNaN(d)) return val;
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
@@ -305,7 +305,7 @@ function buildLossDatasets(allHistory) {
       label: host,
       data: hist.data.map(d => {
         if (agg) return d.loss_pct != null ? d.loss_pct : 0;
-        return d.success === false ? 100 : 0;
+        return d.success === 0 ? 100 : 0;
       }),
       borderColor: color,
       backgroundColor: color,
