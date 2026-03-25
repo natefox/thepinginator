@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+aiosqlite
+pytest
+pytest-asyncio
+httpx
