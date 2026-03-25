@@ -1,0 +1,13 @@
+services:
+  pinginator:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - PING_HOSTS=8.8.8.8,1.1.1.1
+    volumes:
+      - pinginator-data:/data
+    restart: unless-stopped
+
+volumes:
+  pinginator-data:
