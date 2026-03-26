@@ -1,6 +1,6 @@
 services:
   pinginator:
-    build: .
+    image: ghcr.io/natefox/thepinginator:latest
     ports:
       - "8080:8080"
     environment:
