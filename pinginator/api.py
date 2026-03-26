@@ -116,6 +116,25 @@ def create_app(
 
         return {"host": host, "range": range, "baseline": baseline, "data": data}
 
+    @app.get("/api/recent")
+    async def recent():
+        """Return last 3 minutes of raw pings for all hosts, for live view backfill."""
+        now = time.time()
+        since = now - 180
+        results = {}
+        for host in config.hosts:
+            pings = await get_pings(db, host, since=since)
+            results[host] = [
+                {
+                    "host": host,
+                    "timestamp": p["timestamp"],
+                    "rtt_ms": p["rtt_ms"],
+                    "success": bool(p["success"]),
+                }
+                for p in pings
+            ]
+        return results
+
     @app.get("/api/live")
     async def live():
         if subscribers is None:

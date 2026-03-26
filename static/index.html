@@ -178,6 +178,54 @@
   }
   .live-status-dot.connected { background: #4ade80; animation: pulse 2s infinite; }
   .live-status-dot.disconnected { background: #ef4444; }
+
+  /* Heatmap tooltip */
+  .heatmap-tooltip {
+    position: fixed;
+    background: #1e2330;
+    border: 1px solid #3a3f4a;
+    border-radius: 6px;
+    padding: 0.5rem 0.7rem;
+    font-size: 0.75rem;
+    color: #e0e0e0;
+    pointer-events: none;
+    z-index: 1000;
+    white-space: nowrap;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    display: none;
+  }
+  .heatmap-tooltip .tt-rtt { font-weight: 700; font-size: 0.9rem; }
+  .heatmap-tooltip .tt-reason { color: #aaa; margin-top: 2px; }
+  .heatmap-tooltip .tt-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 2px;
+    margin-right: 5px;
+    vertical-align: middle;
+  }
+
+  /* Heatmap legend */
+  .heatmap-legend {
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    font-size: 0.7rem;
+    color: #666;
+    margin-top: 0.5rem;
+    margin-bottom: 0.25rem;
+    flex-wrap: wrap;
+  }
+  .heatmap-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .heatmap-legend-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
 </style>
 </head>
 <body>
@@ -216,11 +264,21 @@
 
 <div id="live-view">
   <div id="live-hosts"></div>
+  <div class="heatmap-legend" id="heatmap-legend">
+    <span style="color:#888; margin-right: 0.25rem;">Legend:</span>
+    <span class="heatmap-legend-item"><span class="heatmap-legend-swatch" style="background:#22c55e"></span> Normal</span>
+    <span class="heatmap-legend-item"><span class="heatmap-legend-swatch" style="background:#4ade80"></span> &le;1&sigma;</span>
+    <span class="heatmap-legend-item"><span class="heatmap-legend-swatch" style="background:#facc15"></span> 1-2&sigma;</span>
+    <span class="heatmap-legend-item"><span class="heatmap-legend-swatch" style="background:#f97316"></span> 2-3&sigma;</span>
+    <span class="heatmap-legend-item"><span class="heatmap-legend-swatch" style="background:#ef4444"></span> &gt;3&sigma;</span>
+    <span class="heatmap-legend-item"><span class="heatmap-legend-swatch" style="background:#dc2626"></span> Timeout</span>
+  </div>
   <div class="chart-container">
     <div class="chart-title">Live Latency (ms)</div>
     <div class="live-chart-wrap"><canvas id="liveChart"></canvas></div>
   </div>
 </div>
+<div class="heatmap-tooltip" id="heatmap-tooltip"></div>
 
 <script>
 const HOST_COLORS = ['#4ade80','#60a5fa','#facc15','#f87171','#c084fc','#fb923c','#22d3ee','#f472b6'];
@@ -286,7 +344,24 @@ function heatmapColor(rttMs, mean, stddev) {
   return '#ef4444';
 }
 
-function drawHeatmap(canvas, data, mean, stddev) {
+function heatmapReason(rttMs, mean, stddev) {
+  if (rttMs === null || rttMs === undefined) return { label: 'Timeout', detail: 'No response received' };
+  if (!mean || !stddev || stddev === 0) {
+    return { label: fmt(rttMs, 1) + ' ms', detail: 'Baseline building...' };
+  }
+  const dev = (rttMs - mean) / stddev;
+  const devStr = dev.toFixed(1);
+  if (dev <= 0) return { label: fmt(rttMs, 1) + ' ms', detail: 'Below average (' + fmt(mean, 1) + ' ms)' };
+  if (dev <= 1) return { label: fmt(rttMs, 1) + ' ms', detail: devStr + '\u03C3 above avg \u2014 Normal' };
+  if (dev <= 2) return { label: fmt(rttMs, 1) + ' ms', detail: devStr + '\u03C3 above avg \u2014 Elevated' };
+  if (dev <= 3) return { label: fmt(rttMs, 1) + ' ms', detail: devStr + '\u03C3 above avg \u2014 High' };
+  return { label: fmt(rttMs, 1) + ' ms', detail: devStr + '\u03C3 above avg \u2014 Very High' };
+}
+
+// Per-host heatmap metadata for tooltip hit-testing
+const heatmapMeta = {}; // host -> { data, mean, stddev, offset, cellW, rect }
+
+function drawHeatmap(canvas, data, mean, stddev, host) {
   const ctx = canvas.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
@@ -304,6 +379,11 @@ function drawHeatmap(canvas, data, mean, stddev) {
   const startIdx = Math.max(0, data.length - HEATMAP_LENGTH);
   const visible = data.slice(startIdx);
   const offset = HEATMAP_LENGTH - visible.length;
+
+  // Store metadata for tooltip hit-testing
+  if (host) {
+    heatmapMeta[host] = { visible, mean, stddev, offset, cellW };
+  }
 
   // Empty cells
   if (offset > 0) {
@@ -409,20 +489,54 @@ function updateLiveHost(hostIdx, host) {
   // Draw heatmap
   const canvas = liveCanvases[host];
   if (canvas) {
-    drawHeatmap(canvas, data, stats.mean, stats.stddev);
+    drawHeatmap(canvas, data, stats.mean, stats.stddev, host);
   }
 }
 
 function updateLiveChart() {
   if (!liveChart) return;
   const now = Date.now() / 1000;
-  const window = 60; // Show last 60 seconds on chart
+  const chartWindow = 60; // Show last 60 seconds on chart
   const datasets = [];
+
+  // Compute a combined baseline from all hosts for the normal band
+  let bandMean = null, bandStddev = null;
+  const allStats = [];
+  hosts.forEach((h) => {
+    const stats = computeRunningStats(liveData[h.host] || []);
+    if (stats.mean != null) allStats.push(stats);
+  });
 
   hosts.forEach((h, i) => {
     const host = h.host;
-    const data = (liveData[host] || []).filter(d => d.timestamp > now - window);
+    const allData = liveData[host] || [];
+    const data = allData.filter(d => d.timestamp > now - chartWindow);
     const color = HOST_COLORS[i % HOST_COLORS.length];
+    const stats = computeRunningStats(allData);
+
+    // Normal band per host (only for first host to avoid clutter, or all if just one)
+    if (stats.mean != null && stats.stddev != null && stats.stddev > 0) {
+      const bandColor = color;
+      datasets.push({
+        label: host + ' normal',
+        data: data.map(d => ({ x: d.timestamp * 1000, y: stats.mean + stats.stddev })),
+        borderColor: 'transparent',
+        backgroundColor: bandColor + '18',
+        pointRadius: 0,
+        borderWidth: 0,
+        fill: '+1',
+      });
+      datasets.push({
+        label: host + ' normal-low',
+        data: data.map(d => ({ x: d.timestamp * 1000, y: Math.max(0, stats.mean - stats.stddev) })),
+        borderColor: 'transparent',
+        backgroundColor: bandColor + '18',
+        pointRadius: 0,
+        borderWidth: 0,
+        fill: false,
+      });
+    }
+
     datasets.push({
       label: host,
       data: data.map(d => ({ x: d.timestamp * 1000, y: d.success ? d.rtt_ms : null })),
@@ -437,6 +551,9 @@ function updateLiveChart() {
   });
 
   liveChart.data.datasets = datasets;
+  liveChart.options.plugins.legend.labels.filter = function(item) {
+    return !item.text.includes(' normal');
+  };
   liveChart.update('none');
 }
 
@@ -742,19 +859,33 @@ async function refresh() {
 // ============================================================
 //  VIEW SWITCHING
 // ============================================================
-function switchToLive() {
+async function fetchRecentPings() {
+  try {
+    const res = await fetch('/api/recent');
+    if (!res.ok) return;
+    const data = await res.json();
+    for (const [host, pings] of Object.entries(data)) {
+      liveData[host] = pings;
+    }
+  } catch (e) { console.error('Failed to fetch recent pings', e); }
+}
+
+async function switchToLive() {
   document.getElementById('history-view').classList.add('hidden');
   document.getElementById('live-view').classList.add('active');
   document.getElementById('refresh-status').style.display = 'none';
   document.getElementById('live-status').style.display = '';
   if (countdownTimer) clearInterval(countdownTimer);
 
-  // Fetch hosts first, then init live view
-  fetchHosts().then(() => {
-    initLiveView();
-    if (!liveChart) createLiveChart();
-    connectSSE();
-  });
+  await fetchHosts();
+  // Backfill live buffers with recent server data before connecting SSE
+  await fetchRecentPings();
+  initLiveView();
+  if (!liveChart) createLiveChart();
+  // Render backfilled data immediately
+  hosts.forEach((h, i) => updateLiveHost(i, h.host));
+  updateLiveChart();
+  connectSSE();
 }
 
 function switchToHistory() {
@@ -810,6 +941,53 @@ document.querySelectorAll('.range-btn').forEach(btn => {
     }
   });
 });
+
+// ============================================================
+//  HEATMAP TOOLTIP
+// ============================================================
+const tooltipEl = document.getElementById('heatmap-tooltip');
+
+document.addEventListener('mousemove', function(e) {
+  const target = e.target;
+  if (!target || target.tagName !== 'CANVAS') { tooltipEl.style.display = 'none'; return; }
+
+  // Find which host this canvas belongs to
+  let foundHost = null;
+  for (const [host, canvas] of Object.entries(liveCanvases)) {
+    if (canvas === target) { foundHost = host; break; }
+  }
+  if (!foundHost || !heatmapMeta[foundHost]) { tooltipEl.style.display = 'none'; return; }
+
+  const meta = heatmapMeta[foundHost];
+  const rect = target.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const cellIdx = Math.floor(x / meta.cellW) - meta.offset;
+
+  if (cellIdx < 0 || cellIdx >= meta.visible.length) { tooltipEl.style.display = 'none'; return; }
+
+  const ping = meta.visible[cellIdx];
+  const rtt = ping.success ? ping.rtt_ms : null;
+  const color = heatmapColor(rtt, meta.mean, meta.stddev);
+  const reason = heatmapReason(rtt, meta.mean, meta.stddev);
+  const time = new Date(ping.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+
+  tooltipEl.innerHTML = `
+    <div class="tt-rtt"><span class="tt-dot" style="background:${color}"></span>${reason.label}</div>
+    <div class="tt-reason">${reason.detail}</div>
+    <div style="color:#666; margin-top:2px; font-size:0.65rem">${time}</div>
+  `;
+  tooltipEl.style.display = 'block';
+  tooltipEl.style.left = (e.clientX + 12) + 'px';
+  tooltipEl.style.top = (e.clientY - 10) + 'px';
+
+  // Keep tooltip within viewport
+  const ttRect = tooltipEl.getBoundingClientRect();
+  if (ttRect.right > window.innerWidth) {
+    tooltipEl.style.left = (e.clientX - ttRect.width - 12) + 'px';
+  }
+});
+
+document.addEventListener('mouseleave', function() { tooltipEl.style.display = 'none'; }, true);
 
 // ============================================================
 //  INIT
