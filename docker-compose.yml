@@ -8,6 +8,7 @@ services:
     volumes:
       - pinginator-data:/data
     restart: unless-stopped
+    stop_grace_period: 3s
 
 volumes:
   pinginator-data:

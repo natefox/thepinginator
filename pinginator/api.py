@@ -36,6 +36,7 @@ def _downsample(data: list[dict], target: int) -> list[dict]:
 def create_app(
     config: Config, db: aiosqlite.Connection,
     subscribers: set[asyncio.Queue] | None = None,
+    shutdown_event: asyncio.Event | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Pinginator", docs_url=None, redoc_url=None)
 
@@ -146,8 +147,13 @@ def create_app(
         async def event_stream():
             try:
                 while True:
-                    data = await queue.get()
-                    yield f"data: {json.dumps(data)}\n\n"
+                    if shutdown_event and shutdown_event.is_set():
+                        break
+                    try:
+                        data = await asyncio.wait_for(queue.get(), timeout=1.0)
+                        yield f"data: {json.dumps(data)}\n\n"
+                    except asyncio.TimeoutError:
+                        continue
             except asyncio.CancelledError:
                 pass
             finally:

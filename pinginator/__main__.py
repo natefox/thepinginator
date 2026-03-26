@@ -1,6 +1,7 @@
 # pinginator/__main__.py
 import asyncio
 import os
+import signal
 
 import aiosqlite
 import uvicorn
@@ -20,8 +21,14 @@ async def main():
     db = await aiosqlite.connect(db_path)
     await init_db(db)
 
+    shutdown_event = asyncio.Event()
     subscribers: set[asyncio.Queue] = set()
-    app = create_app(config, db, subscribers=subscribers)
+    app = create_app(config, db, subscribers=subscribers, shutdown_event=shutdown_event)
+
+    # Signal SSE connections to close on SIGTERM/SIGINT
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, shutdown_event.set)
 
     # Start ping workers for each host — store references to prevent GC
     tasks = set()
@@ -39,8 +46,11 @@ async def main():
     tasks.add(task)
     task.add_done_callback(tasks.discard)
 
-    # Run uvicorn
-    uv_config = uvicorn.Config(app, host="0.0.0.0", port=config.port, log_level="info")
+    # Run uvicorn with short graceful shutdown timeout
+    uv_config = uvicorn.Config(
+        app, host="0.0.0.0", port=config.port, log_level="info",
+        timeout_graceful_shutdown=2,
+    )
     server = uvicorn.Server(uv_config)
     await server.serve()
 
