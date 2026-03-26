@@ -851,6 +851,7 @@ async function fetchHosts() {
     const res = await fetch('/api/hosts');
     if (!res.ok) return;
     hosts = await res.json();
+    document.getElementById('host-count').textContent = hosts.length + ' host' + (hosts.length !== 1 ? 's' : '');
     if (!isLive()) renderCards(hosts);
   } catch (e) { console.error('Failed to fetch hosts', e); }
 }
