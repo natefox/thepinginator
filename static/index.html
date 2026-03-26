@@ -243,7 +243,7 @@
   <label>View:</label>
   <button class="range-btn live-btn" data-range="live">Live</button>
   <button class="range-btn" data-range="1h">1h</button>
-  <button class="range-btn active" data-range="24h">24h</button>
+  <button class="range-btn" data-range="24h">24h</button>
   <button class="range-btn" data-range="7d">7d</button>
   <button class="range-btn" data-range="30d">30d</button>
 </div>
@@ -286,7 +286,7 @@ const STATUS_COLORS = { normal:'#4ade80', elevated:'#facc15', high:'#f87171', do
 const REFRESH_INTERVAL = 12;
 const HEATMAP_LENGTH = 180; // 3 minutes of pings at 1/sec
 
-let selectedRange = '24h';
+let selectedRange = 'live';
 let hosts = [];
 let latencyChart = null;
 let lossChart = null;
@@ -495,42 +495,51 @@ function updateLiveHost(hostIdx, host) {
 
 function updateLiveChart() {
   if (!liveChart) return;
-  const now = Date.now() / 1000;
-  const chartWindow = 60; // Show last 60 seconds on chart
   const datasets = [];
 
-  // Compute a combined baseline from all hosts for the normal band
-  let bandMean = null, bandStddev = null;
-  const allStats = [];
-  hosts.forEach((h) => {
-    const stats = computeRunningStats(liveData[h.host] || []);
-    if (stats.mean != null) allStats.push(stats);
-  });
-
+  // Build index-aligned data: same HEATMAP_LENGTH slots as heatmap strips
+  // Position 0 = oldest (left), HEATMAP_LENGTH-1 = newest (right)
   hosts.forEach((h, i) => {
     const host = h.host;
     const allData = liveData[host] || [];
-    const data = allData.filter(d => d.timestamp > now - chartWindow);
     const color = HOST_COLORS[i % HOST_COLORS.length];
     const stats = computeRunningStats(allData);
 
-    // Normal band per host (only for first host to avoid clutter, or all if just one)
+    const startIdx = Math.max(0, allData.length - HEATMAP_LENGTH);
+    const visible = allData.slice(startIdx);
+    const offset = HEATMAP_LENGTH - visible.length;
+
+    // Build array of HEATMAP_LENGTH points, null-padded on left
+    const points = new Array(HEATMAP_LENGTH).fill(null);
+    const timestamps = new Array(HEATMAP_LENGTH).fill(null);
+    for (let j = 0; j < visible.length; j++) {
+      const d = visible[j];
+      points[offset + j] = d.success ? d.rtt_ms : null;
+      timestamps[offset + j] = d.timestamp;
+    }
+
+    // Normal band per host
     if (stats.mean != null && stats.stddev != null && stats.stddev > 0) {
-      const bandColor = color;
+      const bandHi = new Array(HEATMAP_LENGTH).fill(null);
+      const bandLo = new Array(HEATMAP_LENGTH).fill(null);
+      for (let j = offset; j < HEATMAP_LENGTH; j++) {
+        bandHi[j] = stats.mean + stats.stddev;
+        bandLo[j] = Math.max(0, stats.mean - stats.stddev);
+      }
       datasets.push({
         label: host + ' normal',
-        data: data.map(d => ({ x: d.timestamp * 1000, y: stats.mean + stats.stddev })),
+        data: bandHi,
         borderColor: 'transparent',
-        backgroundColor: bandColor + '18',
+        backgroundColor: color + '18',
         pointRadius: 0,
         borderWidth: 0,
         fill: '+1',
       });
       datasets.push({
         label: host + ' normal-low',
-        data: data.map(d => ({ x: d.timestamp * 1000, y: Math.max(0, stats.mean - stats.stddev) })),
+        data: bandLo,
         borderColor: 'transparent',
-        backgroundColor: bandColor + '18',
+        backgroundColor: color + '18',
         pointRadius: 0,
         borderWidth: 0,
         fill: false,
@@ -539,17 +548,24 @@ function updateLiveChart() {
 
     datasets.push({
       label: host,
-      data: data.map(d => ({ x: d.timestamp * 1000, y: d.success ? d.rtt_ms : null })),
+      data: points,
       borderColor: color,
       backgroundColor: color + '33',
-      pointRadius: 2,
-      pointBackgroundColor: data.map(d => d.success ? color : '#ef4444'),
+      pointRadius: 1.5,
+      pointBackgroundColor: points.map((v, j) => {
+        if (v !== null) return color;
+        // Check if this was a timeout (had a timestamp but null rtt)
+        if (timestamps[j] !== null) return '#ef4444';
+        return color;
+      }),
       tension: 0.1,
       borderWidth: 2,
       spanGaps: false,
     });
   });
 
+  // Labels: index 0..HEATMAP_LENGTH-1
+  liveChart.data.labels = Array.from({ length: HEATMAP_LENGTH }, (_, i) => i);
   liveChart.data.datasets = datasets;
   liveChart.options.plugins.legend.labels.filter = function(item) {
     return !item.text.includes(' normal');
@@ -557,11 +573,25 @@ function updateLiveChart() {
   liveChart.update('none');
 }
 
+// Build tick labels from the first host's timestamp data
+function liveChartTickLabel(idx) {
+  const firstHost = hosts[0];
+  if (!firstHost) return '';
+  const allData = liveData[firstHost.host] || [];
+  const startIdx = Math.max(0, allData.length - HEATMAP_LENGTH);
+  const visible = allData.slice(startIdx);
+  const offset = HEATMAP_LENGTH - visible.length;
+  const dataIdx = idx - offset;
+  if (dataIdx < 0 || dataIdx >= visible.length) return '';
+  const d = new Date(visible[dataIdx].timestamp * 1000);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+}
+
 function createLiveChart() {
   const ctx = document.getElementById('liveChart').getContext('2d');
   liveChart = new Chart(ctx, {
     type: 'line',
-    data: { datasets: [] },
+    data: { labels: [], datasets: [] },
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -570,15 +600,13 @@ function createLiveChart() {
       plugins: { legend: { labels: { usePointStyle: true, boxWidth: 8 } } },
       scales: {
         x: {
-          type: 'linear',
           grid: { color: '#2a2f3a' },
           ticks: {
-            maxTicksLimit: 10,
-            callback: function(val) {
-              const d = new Date(val);
-              return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-            }
-          }
+            maxTicksLimit: 8,
+            callback: function(val, idx) { return liveChartTickLabel(val); },
+          },
+          min: 0,
+          max: HEATMAP_LENGTH - 1,
         },
         y: {
           grid: { color: '#2a2f3a' },
@@ -917,30 +945,48 @@ function startCountdown() {
 }
 
 // ============================================================
-//  RANGE BUTTONS
+//  URL HASH ROUTING
 // ============================================================
-document.querySelectorAll('.range-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    const newRange = btn.dataset.range;
-    const wasLive = isLive();
-    selectedRange = newRange;
+const VALID_VIEWS = ['live', '1h', '24h', '7d', '30d'];
 
-    if (newRange === 'live') {
-      switchToLive();
-    } else {
-      if (wasLive) {
-        switchToHistory();
-      } else {
-        fetchAllHistory().then(history => {
-          updateCharts(history);
-          updateSparklines(history);
-        });
-      }
-    }
+function getViewFromHash() {
+  const hash = location.hash.replace('#', '');
+  return VALID_VIEWS.includes(hash) ? hash : 'live';
+}
+
+function setHash(view) {
+  history.replaceState(null, '', '#' + view);
+}
+
+function activateButton(view) {
+  document.querySelectorAll('.range-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.range === view);
   });
+}
+
+function navigateTo(view) {
+  const wasLive = isLive();
+  selectedRange = view;
+  setHash(view);
+  activateButton(view);
+
+  if (view === 'live') {
+    switchToLive();
+  } else if (wasLive) {
+    switchToHistory();
+  } else {
+    fetchAllHistory().then(history => {
+      updateCharts(history);
+      updateSparklines(history);
+    });
+  }
+}
+
+document.querySelectorAll('.range-btn').forEach(btn => {
+  btn.addEventListener('click', () => navigateTo(btn.dataset.range));
 });
+
+window.addEventListener('hashchange', () => navigateTo(getViewFromHash()));
 
 // ============================================================
 //  HEATMAP TOOLTIP
@@ -994,7 +1040,18 @@ document.addEventListener('mouseleave', function() { tooltipEl.style.display = '
 // ============================================================
 createLatencyChart();
 createLossChart();
-refresh().then(() => startCountdown());
+
+// Route to the view specified in the URL hash, default to live
+const initialView = getViewFromHash();
+selectedRange = initialView;
+activateButton(initialView);
+setHash(initialView);
+
+if (initialView === 'live') {
+  switchToLive();
+} else {
+  refresh().then(() => startCountdown());
+}
 </script>
 </body>
 </html>
