@@ -10,6 +10,7 @@ class Config:
     timeout: int
     data_dir: str
     port: int
+    raw_retention_hours: int
 
 
 def load_config() -> Config:
@@ -19,14 +20,16 @@ def load_config() -> Config:
         sys.exit(1)
 
     hosts = [h.strip() for h in hosts_raw.split(",") if h.strip()]
-    interval = int(os.environ.get("PING_INTERVAL", "10"))
-    timeout = int(os.environ.get("PING_TIMEOUT", "5"))
+    interval = int(os.environ.get("PING_INTERVAL", "1"))
+    timeout_raw = os.environ.get("PING_TIMEOUT")
+    timeout = int(timeout_raw) if timeout_raw else max(1, interval - 1)
+    raw_retention_hours = int(os.environ.get("RAW_RETENTION_HOURS", "24"))
     data_dir = os.environ.get("DATA_DIR", "/data")
     port = int(os.environ.get("PORT", "8080"))
 
-    if timeout >= interval:
+    if timeout > interval:
         print(
-            f"ERROR: PING_TIMEOUT ({timeout}) must be less than PING_INTERVAL ({interval})",
+            f"ERROR: PING_TIMEOUT ({timeout}) must not exceed PING_INTERVAL ({interval})",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -37,4 +40,5 @@ def load_config() -> Config:
         timeout=timeout,
         data_dir=data_dir,
         port=port,
+        raw_retention_hours=raw_retention_hours,
     )

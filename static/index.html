@@ -90,6 +90,7 @@
   }
   .range-btn:hover { border-color: #60a5fa; color: #e0e0e0; }
   .range-btn.active { background: #60a5fa; color: #0f1117; border-color: #60a5fa; font-weight: 600; }
+  .range-btn.live-btn.active { background: #ef4444; border-color: #ef4444; }
 
   /* Charts */
   .chart-container {
@@ -102,6 +103,81 @@
   .chart-title { font-size: 0.9rem; color: #888; margin-bottom: 0.75rem; }
   .chart-wrap { position: relative; width: 100%; height: 300px; }
   .chart-wrap canvas { width: 100% !important; height: 100% !important; }
+
+  /* Live view */
+  #live-view { display: none; }
+  #live-view.active { display: block; }
+  #history-view.hidden { display: none; }
+
+  .live-host {
+    background: #161b22;
+    border: 1px solid #2a2f3a;
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1rem;
+  }
+  .live-host-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.6rem;
+  }
+  .live-host-name { font-size: 0.85rem; color: #888; }
+  .live-host-rtt {
+    font-size: 1.8rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    min-width: 120px;
+    text-align: right;
+  }
+  .live-host-rtt .unit { font-size: 0.8rem; color: #888; font-weight: 400; }
+  .live-host-rtt.timeout { color: #ef4444; }
+  .live-host-stats {
+    display: flex;
+    gap: 1.5rem;
+    font-size: 0.75rem;
+    color: #888;
+    margin-bottom: 0.6rem;
+  }
+  .live-heatmap-wrap {
+    position: relative;
+    width: 100%;
+    height: 28px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: #1a1f2b;
+  }
+  .live-heatmap-wrap canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .live-heatmap-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.65rem;
+    color: #555;
+    margin-top: 2px;
+  }
+
+  .live-chart-wrap {
+    position: relative;
+    width: 100%;
+    height: 250px;
+    margin-top: 1rem;
+  }
+  .live-chart-wrap canvas { width: 100% !important; height: 100% !important; }
+
+  .live-status-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 0.5rem;
+    vertical-align: middle;
+  }
+  .live-status-dot.connected { background: #4ade80; animation: pulse 2s infinite; }
+  .live-status-dot.disconnected { background: #ef4444; }
 </style>
 </head>
 <body>
@@ -110,40 +186,60 @@
   <h1><span class="ping">ping</span><span class="inator">inator</span></h1>
   <div class="header-meta">
     <span id="host-count">0 hosts</span>
-    <span><span class="refresh-dot"></span>Refresh in <span id="countdown">12</span>s</span>
+    <span id="refresh-status"><span class="refresh-dot"></span>Refresh in <span id="countdown">12</span>s</span>
+    <span id="live-status" style="display:none"><span class="live-status-dot connected" id="live-dot"></span>Live</span>
   </div>
 </div>
 
-<div class="cards-grid" id="cards"></div>
-
 <div class="controls">
-  <label>Time range:</label>
+  <label>View:</label>
+  <button class="range-btn live-btn" data-range="live">Live</button>
   <button class="range-btn" data-range="1h">1h</button>
   <button class="range-btn active" data-range="24h">24h</button>
   <button class="range-btn" data-range="7d">7d</button>
   <button class="range-btn" data-range="30d">30d</button>
 </div>
 
-<div class="chart-container">
-  <div class="chart-title">Latency (ms)</div>
-  <div class="chart-wrap"><canvas id="latencyChart"></canvas></div>
+<div id="history-view">
+  <div class="cards-grid" id="cards"></div>
+
+  <div class="chart-container">
+    <div class="chart-title">Latency (ms)</div>
+    <div class="chart-wrap"><canvas id="latencyChart"></canvas></div>
+  </div>
+
+  <div class="chart-container">
+    <div class="chart-title">Packet Loss (%)</div>
+    <div class="chart-wrap"><canvas id="lossChart"></canvas></div>
+  </div>
 </div>
 
-<div class="chart-container">
-  <div class="chart-title">Packet Loss (%)</div>
-  <div class="chart-wrap"><canvas id="lossChart"></canvas></div>
+<div id="live-view">
+  <div id="live-hosts"></div>
+  <div class="chart-container">
+    <div class="chart-title">Live Latency (ms)</div>
+    <div class="live-chart-wrap"><canvas id="liveChart"></canvas></div>
+  </div>
 </div>
 
 <script>
 const HOST_COLORS = ['#4ade80','#60a5fa','#facc15','#f87171','#c084fc','#fb923c','#22d3ee','#f472b6'];
 const STATUS_COLORS = { normal:'#4ade80', elevated:'#facc15', high:'#f87171', down:'#f87171', insufficient_data:'#888' };
 const REFRESH_INTERVAL = 12;
+const HEATMAP_LENGTH = 180; // 3 minutes of pings at 1/sec
 
 let selectedRange = '24h';
 let hosts = [];
 let latencyChart = null;
 let lossChart = null;
+let liveChart = null;
 let countdown = REFRESH_INTERVAL;
+let countdownTimer = null;
+let eventSource = null;
+
+// Per-host live data buffers
+const liveData = {}; // host -> [{timestamp, rtt_ms, success}, ...]
+const liveCanvases = {}; // host -> canvas element
 
 // --- Chart.js defaults ---
 Chart.defaults.color = '#888';
@@ -152,25 +248,284 @@ Chart.defaults.borderColor = '#2a2f3a';
 // --- Helpers ---
 function statusColor(s) { return STATUS_COLORS[(s || '').toLowerCase()] || '#888'; }
 function statusLabel(s) { return (s || 'UNKNOWN').toUpperCase().replace('_', ' '); }
-function fmt(v, d) { return v == null ? '—' : Number(v).toFixed(d != null ? d : 1); }
+function fmt(v, d) { return v == null ? '\u2014' : Number(v).toFixed(d != null ? d : 1); }
 
 function isAggregated() { return selectedRange === '7d' || selectedRange === '30d'; }
+function isLive() { return selectedRange === 'live'; }
 
 function formatLabel(val) {
   if (isAggregated()) {
-    // val is an hour string like "2026-03-24T10" or a date
     if (typeof val === 'string' && val.length >= 10) {
       return val.slice(5, 10).replace('-', '/');
     }
     return val;
   }
-  // val is a Unix timestamp in seconds
   const d = new Date(val * 1000);
   if (isNaN(d)) return val;
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-// --- Sparkline ---
+// ============================================================
+//  HEATMAP RENDERING
+// ============================================================
+function heatmapColor(rttMs, mean, stddev) {
+  if (rttMs === null || rttMs === undefined) return '#dc2626'; // timeout = red
+  if (!mean || !stddev || stddev === 0) {
+    // No baseline yet — use absolute scale
+    if (rttMs < 20) return '#22c55e';
+    if (rttMs < 50) return '#4ade80';
+    if (rttMs < 100) return '#a3e635';
+    if (rttMs < 200) return '#facc15';
+    return '#f87171';
+  }
+  const dev = (rttMs - mean) / stddev;
+  if (dev <= 0) return '#22c55e';
+  if (dev <= 1) return '#4ade80';
+  if (dev <= 2) return '#facc15';
+  if (dev <= 3) return '#f97316';
+  return '#ef4444';
+}
+
+function drawHeatmap(canvas, data, mean, stddev) {
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+
+  const w = rect.width;
+  const h = rect.height;
+  const cellW = w / HEATMAP_LENGTH;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Draw from right (newest) to left (oldest)
+  const startIdx = Math.max(0, data.length - HEATMAP_LENGTH);
+  const visible = data.slice(startIdx);
+  const offset = HEATMAP_LENGTH - visible.length;
+
+  // Empty cells
+  if (offset > 0) {
+    ctx.fillStyle = '#1a1f2b';
+    ctx.fillRect(0, 0, offset * cellW, h);
+  }
+
+  for (let i = 0; i < visible.length; i++) {
+    const ping = visible[i];
+    const rtt = ping.success ? ping.rtt_ms : null;
+    ctx.fillStyle = heatmapColor(rtt, mean, stddev);
+    const x = (offset + i) * cellW;
+    ctx.fillRect(x, 0, Math.ceil(cellW), h);
+
+    // Thin separator
+    ctx.fillStyle = 'rgba(15,17,23,0.3)';
+    ctx.fillRect(x + Math.ceil(cellW) - 0.5, 0, 0.5, h);
+  }
+}
+
+// ============================================================
+//  LIVE VIEW
+// ============================================================
+function computeRunningStats(data) {
+  const rtts = data.filter(d => d.success && d.rtt_ms != null).map(d => d.rtt_ms);
+  if (rtts.length < 5) return { mean: null, stddev: null, min: null, max: null, loss: 0 };
+  const sum = rtts.reduce((a, b) => a + b, 0);
+  const mean = sum / rtts.length;
+  const variance = rtts.reduce((a, v) => a + (v - mean) ** 2, 0) / rtts.length;
+  const stddev = Math.sqrt(variance);
+  const failures = data.filter(d => !d.success).length;
+  return {
+    mean: mean,
+    stddev: stddev,
+    min: Math.min(...rtts),
+    max: Math.max(...rtts),
+    loss: (failures / data.length * 100),
+  };
+}
+
+function initLiveView() {
+  const container = document.getElementById('live-hosts');
+  container.innerHTML = '';
+
+  hosts.forEach((h, i) => {
+    const host = h.host;
+    if (!liveData[host]) liveData[host] = [];
+
+    const el = document.createElement('div');
+    el.className = 'live-host';
+    el.id = 'live-host-' + i;
+    el.innerHTML = `
+      <div class="live-host-header">
+        <div>
+          <span class="live-status-dot connected" style="background:${HOST_COLORS[i % HOST_COLORS.length]}"></span>
+          <span class="live-host-name">${host}</span>
+        </div>
+        <div class="live-host-rtt" id="live-rtt-${i}">\u2014 <span class="unit">ms</span></div>
+      </div>
+      <div class="live-host-stats" id="live-stats-${i}">
+        <span>avg: \u2014</span>
+        <span>\u03C3: \u2014</span>
+        <span>min: \u2014</span>
+        <span>max: \u2014</span>
+        <span>loss: \u2014</span>
+      </div>
+      <div class="live-heatmap-wrap"><canvas id="live-heatmap-${i}"></canvas></div>
+      <div class="live-heatmap-label"><span>3m ago</span><span>now</span></div>
+    `;
+    container.appendChild(el);
+    liveCanvases[host] = document.getElementById('live-heatmap-' + i);
+  });
+}
+
+function updateLiveHost(hostIdx, host) {
+  const data = liveData[host] || [];
+  if (data.length === 0) return;
+
+  const latest = data[data.length - 1];
+  const rttEl = document.getElementById('live-rtt-' + hostIdx);
+  if (rttEl) {
+    if (latest.success && latest.rtt_ms != null) {
+      rttEl.innerHTML = `${fmt(latest.rtt_ms, 1)} <span class="unit">ms</span>`;
+      rttEl.classList.remove('timeout');
+    } else {
+      rttEl.innerHTML = `TIMEOUT`;
+      rttEl.classList.add('timeout');
+    }
+  }
+
+  const stats = computeRunningStats(data);
+  const statsEl = document.getElementById('live-stats-' + hostIdx);
+  if (statsEl) {
+    statsEl.innerHTML = `
+      <span>avg: ${fmt(stats.mean)} ms</span>
+      <span>\u03C3: ${fmt(stats.stddev)} ms</span>
+      <span>min: ${fmt(stats.min)} ms</span>
+      <span>max: ${fmt(stats.max)} ms</span>
+      <span>loss: ${fmt(stats.loss, 1)}%</span>
+    `;
+  }
+
+  // Draw heatmap
+  const canvas = liveCanvases[host];
+  if (canvas) {
+    drawHeatmap(canvas, data, stats.mean, stats.stddev);
+  }
+}
+
+function updateLiveChart() {
+  if (!liveChart) return;
+  const now = Date.now() / 1000;
+  const window = 60; // Show last 60 seconds on chart
+  const datasets = [];
+
+  hosts.forEach((h, i) => {
+    const host = h.host;
+    const data = (liveData[host] || []).filter(d => d.timestamp > now - window);
+    const color = HOST_COLORS[i % HOST_COLORS.length];
+    datasets.push({
+      label: host,
+      data: data.map(d => ({ x: d.timestamp * 1000, y: d.success ? d.rtt_ms : null })),
+      borderColor: color,
+      backgroundColor: color + '33',
+      pointRadius: 2,
+      pointBackgroundColor: data.map(d => d.success ? color : '#ef4444'),
+      tension: 0.1,
+      borderWidth: 2,
+      spanGaps: false,
+    });
+  });
+
+  liveChart.data.datasets = datasets;
+  liveChart.update('none');
+}
+
+function createLiveChart() {
+  const ctx = document.getElementById('liveChart').getContext('2d');
+  liveChart = new Chart(ctx, {
+    type: 'line',
+    data: { datasets: [] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { usePointStyle: true, boxWidth: 8 } } },
+      scales: {
+        x: {
+          type: 'linear',
+          grid: { color: '#2a2f3a' },
+          ticks: {
+            maxTicksLimit: 10,
+            callback: function(val) {
+              const d = new Date(val);
+              return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+            }
+          }
+        },
+        y: {
+          grid: { color: '#2a2f3a' },
+          beginAtZero: true,
+          title: { display: true, text: 'ms' }
+        }
+      }
+    }
+  });
+}
+
+// ============================================================
+//  SSE CONNECTION
+// ============================================================
+function connectSSE() {
+  if (eventSource) return;
+  eventSource = new EventSource('/api/live');
+  document.getElementById('live-dot').className = 'live-status-dot connected';
+
+  eventSource.onmessage = function(e) {
+    const ping = JSON.parse(e.data);
+    const host = ping.host;
+
+    if (!liveData[host]) liveData[host] = [];
+    liveData[host].push(ping);
+
+    // Trim buffer to max length
+    if (liveData[host].length > HEATMAP_LENGTH * 2) {
+      liveData[host] = liveData[host].slice(-HEATMAP_LENGTH);
+    }
+
+    // Update the specific host
+    const hostIdx = hosts.findIndex(h => h.host === host);
+    if (hostIdx >= 0) {
+      updateLiveHost(hostIdx, host);
+    }
+
+    // Throttle chart updates to ~4fps
+    if (!connectSSE._chartTimer) {
+      connectSSE._chartTimer = setTimeout(() => {
+        updateLiveChart();
+        connectSSE._chartTimer = null;
+      }, 250);
+    }
+  };
+
+  eventSource.onerror = function() {
+    document.getElementById('live-dot').className = 'live-status-dot disconnected';
+    disconnectSSE();
+    // Reconnect after 2 seconds
+    setTimeout(() => { if (isLive()) connectSSE(); }, 2000);
+  };
+}
+
+function disconnectSSE() {
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+}
+
+// ============================================================
+//  HISTORY VIEW (original)
+// ============================================================
 function sparklineSVG(data, color) {
   if (!data || data.length < 2) return '';
   const vals = data.map(d => d.rtt_ms != null ? d.rtt_ms : (d.avg_ms != null ? d.avg_ms : null)).filter(v => v != null);
@@ -188,7 +543,6 @@ function sparklineSVG(data, color) {
   </svg>`;
 }
 
-// --- Cards ---
 function renderCards(hostsData) {
   const el = document.getElementById('cards');
   document.getElementById('host-count').textContent = hostsData.length + ' host' + (hostsData.length !== 1 ? 's' : '');
@@ -197,7 +551,7 @@ function renderCards(hostsData) {
     const rtt = h.current_rtt_ms;
     return `<div class="card" style="border-left-color:${sc}" data-host="${h.host}">
       <div class="card-host">${h.host}</div>
-      <div class="card-rtt">${rtt != null ? fmt(rtt, 1) : '—'} <span class="unit">ms</span></div>
+      <div class="card-rtt">${rtt != null ? fmt(rtt, 1) : '\u2014'} <span class="unit">ms</span></div>
       <span class="card-badge" style="background:${sc}">${statusLabel(h.status)}</span>
       <div class="card-stats">
         24h avg: ${fmt(h.avg_24h_ms)} ms &middot; &sigma;: ${fmt(h.stddev_24h_ms)} ms<br>
@@ -208,7 +562,6 @@ function renderCards(hostsData) {
   }).join('');
 }
 
-// --- Charts ---
 function createLatencyChart() {
   const ctx = document.getElementById('latencyChart').getContext('2d');
   latencyChart = new Chart(ctx, {
@@ -265,7 +618,6 @@ function buildLatencyDatasets(allHistory) {
       borderWidth: 2
     });
 
-    // Sigma band (only for non-aggregated with baseline)
     if (!agg && hist.baseline && hist.baseline.mean_ms != null && hist.baseline.stddev_ms != null) {
       const mean = hist.baseline.mean_ms;
       const sigma = hist.baseline.stddev_ms;
@@ -329,7 +681,6 @@ function buildLabels(allHistory) {
 function updateCharts(allHistory) {
   const labels = buildLabels(allHistory);
 
-  // Filter sigma-band datasets from legend
   const latencyDatasets = buildLatencyDatasets(allHistory);
   latencyChart.data.labels = labels;
   latencyChart.data.datasets = latencyDatasets;
@@ -343,7 +694,6 @@ function updateCharts(allHistory) {
   lossChart.update('none');
 }
 
-// --- Sparklines from history ---
 function updateSparklines(allHistory) {
   hosts.forEach((h, i) => {
     const el = document.getElementById('spark-' + i);
@@ -355,13 +705,15 @@ function updateSparklines(allHistory) {
   });
 }
 
-// --- Data fetching ---
+// ============================================================
+//  DATA FETCHING
+// ============================================================
 async function fetchHosts() {
   try {
     const res = await fetch('/api/hosts');
     if (!res.ok) return;
     hosts = await res.json();
-    renderCards(hosts);
+    if (!isLive()) renderCards(hosts);
   } catch (e) { console.error('Failed to fetch hosts', e); }
 }
 
@@ -380,19 +732,52 @@ async function fetchAllHistory() {
 
 async function refresh() {
   await fetchHosts();
-  const history = await fetchAllHistory();
-  updateCharts(history);
-  updateSparklines(history);
+  if (!isLive()) {
+    const history = await fetchAllHistory();
+    updateCharts(history);
+    updateSparklines(history);
+  }
 }
 
-// --- Countdown timer ---
+// ============================================================
+//  VIEW SWITCHING
+// ============================================================
+function switchToLive() {
+  document.getElementById('history-view').classList.add('hidden');
+  document.getElementById('live-view').classList.add('active');
+  document.getElementById('refresh-status').style.display = 'none';
+  document.getElementById('live-status').style.display = '';
+  if (countdownTimer) clearInterval(countdownTimer);
+
+  // Fetch hosts first, then init live view
+  fetchHosts().then(() => {
+    initLiveView();
+    if (!liveChart) createLiveChart();
+    connectSSE();
+  });
+}
+
+function switchToHistory() {
+  disconnectSSE();
+  document.getElementById('live-view').classList.remove('active');
+  document.getElementById('history-view').classList.remove('hidden');
+  document.getElementById('refresh-status').style.display = '';
+  document.getElementById('live-status').style.display = 'none';
+
+  refresh().then(() => startCountdown());
+}
+
+// ============================================================
+//  COUNTDOWN
+// ============================================================
 function startCountdown() {
+  if (countdownTimer) clearInterval(countdownTimer);
   countdown = REFRESH_INTERVAL;
   document.getElementById('countdown').textContent = countdown;
-  const timer = setInterval(() => {
+  countdownTimer = setInterval(() => {
     countdown--;
     if (countdown <= 0) {
-      clearInterval(timer);
+      clearInterval(countdownTimer);
       refresh().then(() => startCountdown());
       return;
     }
@@ -400,21 +785,35 @@ function startCountdown() {
   }, 1000);
 }
 
-// --- Range buttons ---
+// ============================================================
+//  RANGE BUTTONS
+// ============================================================
 document.querySelectorAll('.range-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    selectedRange = btn.dataset.range;
-    // Immediate refresh on range change
-    fetchAllHistory().then(history => {
-      updateCharts(history);
-      updateSparklines(history);
-    });
+    const newRange = btn.dataset.range;
+    const wasLive = isLive();
+    selectedRange = newRange;
+
+    if (newRange === 'live') {
+      switchToLive();
+    } else {
+      if (wasLive) {
+        switchToHistory();
+      } else {
+        fetchAllHistory().then(history => {
+          updateCharts(history);
+          updateSparklines(history);
+        });
+      }
+    }
   });
 });
 
-// --- Init ---
+// ============================================================
+//  INIT
+// ============================================================
 createLatencyChart();
 createLossChart();
 refresh().then(() => startCountdown());

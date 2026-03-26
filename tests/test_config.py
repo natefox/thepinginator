@@ -12,10 +12,11 @@ def test_load_config_parses_hosts(monkeypatch):
 def test_load_config_defaults(monkeypatch):
     monkeypatch.setenv("PING_HOSTS", "8.8.8.8")
     cfg = load_config()
-    assert cfg.interval == 10
-    assert cfg.timeout == 5
+    assert cfg.interval == 1
+    assert cfg.timeout == 1  # auto-calculated: max(1, interval - 1)
     assert cfg.data_dir == "/data"
     assert cfg.port == 8080
+    assert cfg.raw_retention_hours == 24
 
 
 def test_load_config_custom_values(monkeypatch):
@@ -37,15 +38,16 @@ def test_load_config_missing_hosts_raises(monkeypatch):
         load_config()
 
 
-def test_load_config_timeout_gte_interval_raises(monkeypatch):
+def test_load_config_timeout_gt_interval_raises(monkeypatch):
     monkeypatch.setenv("PING_HOSTS", "8.8.8.8")
     monkeypatch.setenv("PING_INTERVAL", "5")
-    monkeypatch.setenv("PING_TIMEOUT", "5")
+    monkeypatch.setenv("PING_TIMEOUT", "6")
     with pytest.raises(SystemExit):
         load_config()
 
 
 def test_load_config_strips_whitespace(monkeypatch):
     monkeypatch.setenv("PING_HOSTS", " 8.8.8.8 , 1.1.1.1 ")
+    monkeypatch.setenv("PING_INTERVAL", "10")
     cfg = load_config()
     assert cfg.hosts == ["8.8.8.8", "1.1.1.1"]

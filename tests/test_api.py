@@ -17,6 +17,7 @@ def config():
         timeout=5,
         data_dir="/tmp",
         port=8080,
+        raw_retention_hours=24,
     )
 
 

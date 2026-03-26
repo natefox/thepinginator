@@ -32,14 +32,30 @@ async def ping_once(host: str, timeout: int) -> dict:
         return {"success": False, "rtt_ms": None}
 
 
-async def ping_worker(host: str, config: Config, db: aiosqlite.Connection) -> None:
+async def ping_worker(
+    host: str, config: Config, db: aiosqlite.Connection,
+    subscribers: set[asyncio.Queue] | None = None,
+) -> None:
     while True:
         result = await ping_once(host, config.timeout)
+        ts = time.time()
         await insert_ping(
             db,
-            timestamp=time.time(),
+            timestamp=ts,
             host=host,
             rtt_ms=result["rtt_ms"],
             success=1 if result["success"] else 0,
         )
+        if subscribers is not None:
+            event = {
+                "host": host,
+                "timestamp": ts,
+                "rtt_ms": result["rtt_ms"],
+                "success": result["success"],
+            }
+            for queue in list(subscribers):
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    pass
         await asyncio.sleep(config.interval)

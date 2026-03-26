@@ -20,17 +20,22 @@ async def main():
     db = await aiosqlite.connect(db_path)
     await init_db(db)
 
-    app = create_app(config, db)
+    subscribers: set[asyncio.Queue] = set()
+    app = create_app(config, db, subscribers=subscribers)
 
     # Start ping workers for each host — store references to prevent GC
     tasks = set()
     for host in config.hosts:
-        task = asyncio.create_task(ping_worker(host, config, db))
+        task = asyncio.create_task(
+            ping_worker(host, config, db, subscribers=subscribers)
+        )
         tasks.add(task)
         task.add_done_callback(tasks.discard)
 
     # Start rollup worker
-    task = asyncio.create_task(rollup_worker(db, config.hosts))
+    task = asyncio.create_task(
+        rollup_worker(db, config.hosts, raw_retention_hours=config.raw_retention_hours)
+    )
     tasks.add(task)
     task.add_done_callback(tasks.discard)
 

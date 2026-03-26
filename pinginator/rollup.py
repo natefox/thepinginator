@@ -63,14 +63,16 @@ async def purge_old_pings(db: aiosqlite.Connection, before: float) -> int:
     return await delete_old_pings(db, before)
 
 
-async def rollup_worker(db: aiosqlite.Connection, hosts: list[str]) -> None:
+async def rollup_worker(
+    db: aiosqlite.Connection, hosts: list[str], raw_retention_hours: int = 24,
+) -> None:
     while True:
         now = datetime.now(timezone.utc)
         prev_hour = (now - timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
         hour_str = prev_hour.strftime("%Y-%m-%dT%H:%M:%S")
         await run_rollup(db, hosts, hour_str)
 
-        cutoff = time.time() - (7 * 24 * 3600)
+        cutoff = time.time() - (raw_retention_hours * 3600)
         await purge_old_pings(db, before=cutoff)
 
         next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)

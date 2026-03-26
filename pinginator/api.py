@@ -1,11 +1,13 @@
 # pinginator/api.py
+import asyncio
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from pinginator.config import Config
@@ -15,9 +17,26 @@ from pinginator.stats import compute_stats, classify_status, median_of_last_n
 VALID_RANGES = {"1h", "24h", "7d", "30d"}
 RANGE_SECONDS = {"1h": 3600, "24h": 86400, "7d": 604800, "30d": 2592000}
 STATIC_DIR = Path(__file__).parent.parent / "static"
+MAX_CHART_POINTS = 2000
 
 
-def create_app(config: Config, db: aiosqlite.Connection) -> FastAPI:
+def _downsample(data: list[dict], target: int) -> list[dict]:
+    if len(data) <= target:
+        return data
+    step = len(data) / target
+    result = []
+    for i in range(target):
+        idx = int(i * step)
+        result.append(data[idx])
+    if data[-1] not in result:
+        result.append(data[-1])
+    return result
+
+
+def create_app(
+    config: Config, db: aiosqlite.Connection,
+    subscribers: set[asyncio.Queue] | None = None,
+) -> FastAPI:
     app = FastAPI(title="Pinginator", docs_url=None, redoc_url=None)
 
     @app.get("/api/health")
@@ -88,6 +107,7 @@ def create_app(config: Config, db: aiosqlite.Connection) -> FastAPI:
         if range in ("1h", "24h"):
             since = now - RANGE_SECONDS[range]
             data = await get_pings(db, host, since=since)
+            data = _downsample(data, MAX_CHART_POINTS)
         else:
             days = 7 if range == "7d" else 30
             since_dt = datetime.now(timezone.utc) - timedelta(days=days)
@@ -95,6 +115,30 @@ def create_app(config: Config, db: aiosqlite.Connection) -> FastAPI:
             data = await get_rollups(db, host, since_hour=since_hour)
 
         return {"host": host, "range": range, "baseline": baseline, "data": data}
+
+    @app.get("/api/live")
+    async def live():
+        if subscribers is None:
+            raise HTTPException(status_code=503, detail="Live streaming not available")
+
+        queue = asyncio.Queue(maxsize=256)
+        subscribers.add(queue)
+
+        async def event_stream():
+            try:
+                while True:
+                    data = await queue.get()
+                    yield f"data: {json.dumps(data)}\n\n"
+            except asyncio.CancelledError:
+                pass
+            finally:
+                subscribers.discard(queue)
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/")
     async def index():
