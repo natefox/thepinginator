@@ -638,19 +638,12 @@ function connectSSE() {
       liveData[host] = liveData[host].slice(-HEATMAP_LENGTH);
     }
 
-    // Update the specific host
+    // Update the specific host heatmap + chart together
     const hostIdx = hosts.findIndex(h => h.host === host);
     if (hostIdx >= 0) {
       updateLiveHost(hostIdx, host);
     }
-
-    // Throttle chart updates to ~4fps
-    if (!connectSSE._chartTimer) {
-      connectSSE._chartTimer = setTimeout(() => {
-        updateLiveChart();
-        connectSSE._chartTimer = null;
-      }, 250);
-    }
+    updateLiveChart();
   };
 
   eventSource.onerror = function() {
